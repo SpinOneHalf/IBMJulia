@@ -6,15 +6,13 @@ include("utils.jl")
 # Parameters
 gamma = 1.4
 CFL = 0.5
-
-function update(Qnew, dt, dx, dy, nx, ny, Fh, Gh, fb)
-        @threads for j = 2 :ny - 1
-            for i = 2: nx - 1
-                Qnew[i, j, :] = Qnew[i, j, :] - (dt / dx) * (Fh[i, j, :] - Fh[i - 1, j, :]) - (dt / dy) * (
-                    Gh[i, j, :] - Gh[i, j - 1, :]) + fb[i, j, :] * dt
-            end
+println(Threads.nthreads())
+function update!(Qnew, dt, dx, dy, nx, ny, Fh, Gh, fb)
+        @threads for j =2:ny-1
+        Qnew[2:nx-1, j, :] = Qnew[2:nx-1, j, :] - 
+        (dt / dx) * (Fh[2:nx-1, j, :] - Fh[1:nx-2, j, :]) - 
+        (dt / dy) * (Gh[2:nx-1, j, :] - Gh[2:nx-1, j-1, :]) + fb[2:nx-1,j,:] * dt
         end
-    return Qnew
 end
 
 function simulation(r, u, v, E, p, c,
@@ -22,26 +20,33 @@ function simulation(r, u, v, E, p, c,
     # TODO: Redesign around generic force on fluid
     t = 0
     C=c
+    Q = Array{Float32}(undef,nx, ny, 4)
+    F = Array{Float32}(undef,nx, ny, 4)
+    G = Array{Float32}(undef,nx, ny, 4)
+    ah1 = Array{Float32}(undef,nx, ny)
+    ah2 = Array{Float32}(undef,nx, ny)
+    Fh = Array{Float32}(undef,nx - 1, ny, 4)
+    Gh = Array{Float32}(undef,nx, ny - 1, 4)
     while t < tMax
         dt = CFL * minimum([dx, dy]) / maximum(C.+sqrt.(u.*u+v.*v))
         print("time is:")
         println(t)
-        Qnew, F, G = generateQFG(r, u, v, E, p)
-        Fh, Gh = generateFhGh(Qnew, F, G, c, u, v)
+        generateQFG!(Q,F,G,r, u, v, E, p)
+        generateFhGh!(ah1,ah2,Fh,Gh,Q, F, G, c, u, v)
 
-        X0 = X0 + dt / 2 * forcesBody(Qnew, X0, dx, dy, ny, nx)
+        X0 = X0 + dt / 2 * forcesBody(Q, X0, dx, dy, ny, nx)
         FB = forceFluid(dx, dy, nx, ny, X0, dtheta, t,k,u,v)
-        Qnew = update(Qnew, dt, dx, dy, nx, ny, Fh, Gh, FB)
-        X0 = X0 + dt / 2 * forcesBody(Qnew, X0, dx, dy, ny, nx)
-        Qnew[:, 1, :] = Qnew[:, 2, :]
-        Qnew[1, :, :] = Qnew[2, :, :]
-        Qnew[:, ny - 1, :] = Qnew[:, ny - 2, :]
-        Qnew[nx - 1, :, :] = Qnew[nx - 2, :, :]
+        update!(Q, dt, dx, dy, nx, ny, Fh, Gh, FB)
+        X0 = X0 + dt / 2 * forcesBody(Q, X0, dx, dy, ny, nx)
+        Q[:, 1, :] = Q[:, 2, :]
+        Q[1, :, :] = Q[2, :, :]
+        Q[:, ny - 1, :] = Q[:, ny - 2, :]
+        Q[nx - 1, :, :] = Q[nx - 2, :, :]
         # Primitive variables
-        r = Qnew[:, :, 1]
-        u = Qnew[:, :, 2] ./ r
-        v = Qnew[:, :, 3] ./ r
-        E = Qnew[:, :, 4]
+        r = Q[:, :, 1]
+        u = Q[:, :, 2] ./ r
+        v = Q[:, :, 3] ./ r
+        E = Q[:, :, 4]
   
         p = (gamma - 1) * (E - 0.5 * r .* (u .* u + v.* v))
         
@@ -53,51 +58,38 @@ function simulation(r, u, v, E, p, c,
     return r,u,v,E,p
 end
 
-function generateQFG(r, u, v, E, p)
+function generateQFG!(Q,F,G,r, u, v, E, p)
     nx, ny = size(r)
-    Q = zeros((nx, ny, 4))
-    F = zeros((nx, ny, 4))
-    G = zeros((nx, ny, 4))
-    @threads for j =1: ny
-        for i = 1: nx
-            # Flux calculation
-            Q[i, j, 1] = r[i, j]
-            Q[i, j, 2] = r[i, j] * u[i, j]
-            Q[i, j, 3] = r[i, j] * v[i, j]
-            Q[i, j, 4] = E[i, j]
+   @threads for j = 1:ny
+    # Flux calculation
+    Q[1: nx, j, 1] = r[1: nx, j]
+    Q[1: nx, j, 2] = r[1: nx, j].* u[1: nx, j]
+    Q[1: nx, j, 3] = r[1: nx, j].* v[1: nx, j]
+    Q[1: nx, j, 4] = E[1: nx, j]
 
-            F[i, j, 1] = r[i, j] * u[i, j]
-            F[i, j, 2] = r[i, j] * u[i, j] ^ 2 + p[i, j]
-            F[i, j, 3] = r[i, j] * u[i, j] * v[i, j]
-            F[i, j, 4] = u[i, j] * (E[i, j] + p[i, j])
+    F[1: nx, j, 1] = r[1: nx, j].* u[1: nx, j]
+    F[1: nx, j, 2] = r[1: nx, j].* (u[1: nx, j].^ 2) + p[1: nx, j]
+    F[1: nx, j, 3] = r[1: nx, j].* u[1: nx,j].* v[1: nx, j]
+    F[1: nx, j, 4] = u[1: nx, j].* (E[1: nx, j] + p[1: nx, j])
 
-            G[i, j, 1] = r[i, j] * v[i, j]
-            G[i, j, 2] = r[i, j] * v[i, j] * u[i, j]
-            G[i, j, 3] = r[i, j] * v[i, j] ^ 2 + p[i, j]
-            G[i, j, 4] = v[i, j] * (E[i, j] + p[i, j])
-        end
+    G[1: nx,j, 1] = r[1: nx, j].* v[1: nx, j]
+    G[1: nx, j, 2] = r[1: nx, j].* v[1: nx, j].* u[1: nx, j]
+    G[1: nx, j, 3] = r[1: nx, j].* v[1: nx, j].^ 2 + p[1: nx, j]
+    G[1: nx, j, 4] = v[1: nx, j].* (E[1: nx, j] + p[1: nx, j])
     end
     return Q, F, G
 end
 
-function generateFhGh(Q, F, G, c, u, v)
+function generateFhGh!(ah1,ah2,Fh,Gh,Q, F, G, c, u, v)
     nx, ny = size(c)
 
-    ah1 = zeros((nx, ny))
-    ah2 = zeros((nx, ny))
+        @threads for i =1 :nx - 1
+            ah1[i, 1:ny-1] = max(abs.(u[i, 1: ny - 1]) + c[i, 1: ny - 1], abs.(u[i + 1, 1: ny - 1]) + c[i + 1, 1: ny - 1])
+            ah2[i, 1:ny-1] = max(abs.(v[i, 1: ny - 1]) + c[i, 1: ny - 1], abs.(v[i, 2: ny]) + c[i, 2:ny])
 
-    Fh = zeros((nx - 1, ny, 4))
-    Gh = zeros((nx, ny - 1, 4))
-
-    @threads for j = 1: ny - 1
-        for i =1 :nx - 1
-            ah1[i, j] = max(abs(u[i, j]) + c[i, j], abs(u[i + 1, j]) + c[i + 1, j])
-            ah2[i, j] = max(abs(v[i, j]) + c[i, j], abs(v[i, j + 1]) + c[i, j + 1])
-
-            Fh[i, j, :] = 0.5 * (F[i + 1, j, :] + F[i, j, :] - ah1[i, j] * (Q[i + 1, j, :] - Q[i, j, :]))
-            Gh[i, j, :] = 0.5 * (G[i, j, :] + G[i, j + 1, :] - ah2[i, j] * (Q[i, j + 1, :] - Q[i, j, :]))
+            Fh[i, 1:ny-1, :] = 0.5 * (F[i + 1, 1:ny-1, :] + F[i, 1: ny-1, :] - ah1[i, 1:ny-1].* (Q[i + 1, 1:ny-1, :] - Q[i,1: ny-1, :]))
+            Gh[i, 1:ny-1, :] = 0.5 * (G[i, 1: ny - 1, :] + G[i, 2: ny, :] - ah2[i, 1: ny - 1].* (Q[i, 2: ny, :] - Q[i, 1: ny - 1, :]))
         end
-    end
     return Fh, Gh
 end
 
@@ -118,9 +110,7 @@ function forceFluid(dx, dy, nx, ny, X0, dtheta, t,k,u,v)
                 Fl = w * Fk[l, :] * dtheta
                 ftemp[1:2] += Fl
                 ftemp[3]+=Fl[1]*u[i,j]+Fl[2]*v[i,j]
-            Fb[i, j, 2] = ftemp[1]
-            Fb[i, j, 3] = ftemp[2]
-            Fb[i,j,4]=ftemp[3]
+            Fb[i, j, 2:4] .= ftemp
             end
         end
     end
@@ -130,8 +120,8 @@ end
 
 function _curve_force(xs, dthe, t, K=.1)
     k = size(xs)[1]
-    tempf = zeros((k, 2))
-    @inbounds for i = 2:k - 1
+    tempf = Array{Float32}(undef,k, 2)
+    @threads for i = 2:k - 1
         tempf[i, :] = ((xs[i + 1,:] - 2 * xs[i, :] + xs[i - 1,:])./ (dthe ^ 2)) *K
     end
     tempf[1, :] = ((xs[end, :] - 2 * xs[1, :] + xs[2, :])./ (dthe ^ 2)) * K
@@ -150,7 +140,7 @@ function forcesBody(Qnew, X0,
     points_n, _ = size(X0)
     ut=linear_interpolation((x,y), u)
     vt=linear_interpolation((x,y),v)
-    vs = zeros((points_n, 2))
+    vs = Array{Float32}(undef,points_n, 2)
     @inbounds for i = 1:points_n
         temp_x = X0[i, :]
         xp = (floor(temp_x[1] / dx)% nx) * dx
