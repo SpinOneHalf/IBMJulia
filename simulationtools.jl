@@ -4,9 +4,9 @@ import Base.Threads.@threads
 using Plots
 include("utils.jl")
 # Parameters
-gamma = 1.4
-CFL = 0.5
-println(Threads.nthreads())
+global gamma = 1.4
+global CFL = 0.5
+
 function update!(Qnew, dt, dx, dy, nx, ny, Fh, Gh, fb)
         @threads for j =2:ny-1
         Qnew[2:nx-1, j, :] = Qnew[2:nx-1, j, :] - 
@@ -27,6 +27,11 @@ function simulation(r, u, v, E, p, c,
     ah2 = Array{Float32}(undef,nx, ny)
     Fh = Array{Float32}(undef,nx - 1, ny, 4)
     Gh = Array{Float32}(undef,nx, ny - 1, 4)
+    Fb = zeros((nx, ny, 4))
+    points_n, _ = size(X0)
+    vs = Array{Float32}(undef,points_n, 2)
+    ks = size(xs)[1]
+    tempf = Array{Float32}(undef,ks, 2)
     while t < tMax
         dt = CFL * minimum([dx, dy]) / maximum(C.+sqrt.(u.*u+v.*v))
         print("time is:")
@@ -34,10 +39,10 @@ function simulation(r, u, v, E, p, c,
         generateQFG!(Q,F,G,r, u, v, E, p)
         generateFhGh!(ah1,ah2,Fh,Gh,Q, F, G, c, u, v)
 
-        X0 = X0 + dt / 2 * forcesBody(Q, X0, dx, dy, ny, nx)
-        FB = forceFluid(dx, dy, nx, ny, X0, dtheta, t,k,u,v)
-        update!(Q, dt, dx, dy, nx, ny, Fh, Gh, FB)
-        X0 = X0 + dt / 2 * forcesBody(Q, X0, dx, dy, ny, nx)
+        X0 = X0 + dt / 2 * forcesBody(vs,Q, X0, dx, dy, ny, nx)
+        forceFluid!(Fb,dx, dy, nx, ny, X0, dtheta, t,k,u,v,tempf)
+        update!(Q, dt, dx, dy, nx, ny, Fh, Gh, Fb)
+        X0 = X0 + dt / 2 * forcesBody(vs,Q, X0, dx, dy, ny, nx)
         Q[:, 1, :] = Q[:, 2, :]
         Q[1, :, :] = Q[2, :, :]
         Q[:, ny - 1, :] = Q[:, ny - 2, :]
@@ -60,7 +65,7 @@ end
 
 function generateQFG!(Q,F,G,r, u, v, E, p)
     nx, ny = size(r)
-   @threads for j = 1:ny
+    @threads for j = 1:ny
     # Flux calculation
     Q[1: nx, j, 1] = r[1: nx, j]
     Q[1: nx, j, 2] = r[1: nx, j].* u[1: nx, j]
@@ -83,7 +88,7 @@ end
 function generateFhGh!(ah1,ah2,Fh,Gh,Q, F, G, c, u, v)
     nx, ny = size(c)
 
-        @threads for i =1 :nx - 1
+          @threads for i =1 :nx - 1
             ah1[i, 1:ny-1] = max(abs.(u[i, 1: ny - 1]) + c[i, 1: ny - 1], abs.(u[i + 1, 1: ny - 1]) + c[i + 1, 1: ny - 1])
             ah2[i, 1:ny-1] = max(abs.(v[i, 1: ny - 1]) + c[i, 1: ny - 1], abs.(v[i, 2: ny]) + c[i, 2:ny])
 
@@ -93,15 +98,17 @@ function generateFhGh!(ah1,ah2,Fh,Gh,Q, F, G, c, u, v)
     return Fh, Gh
 end
 
-function forceFluid(dx, dy, nx, ny, X0, dtheta, t,k,u,v)
-    Fk = _curve_force(X0, dtheta, t,k)
+function forceFluid!(Fb,dx, dy, nx, ny, X0, dtheta, t,k,u,v,tempf)
+    Fk = _curve_force(X0, dtheta, t,k,tempf)
     p =size(X0)[1]
-    Fb = zeros((nx, ny, 4))
-    @threads for i = 1:nx
+    fill!(Fb,0.0)
+    ftemp = zeros((3))
+     @threads for i = 1:nx
+        ftemp = zeros((3))
         for j = 1:ny
             xp = i * dx
             yp = j * dy
-            ftemp = zeros((3))
+            
             for l = 1:p
                 xtemp = X0[l, :]
                 xpt = (floor(xtemp[1] / dx)% nx )* dx
@@ -111,16 +118,16 @@ function forceFluid(dx, dy, nx, ny, X0, dtheta, t,k,u,v)
                 ftemp[1:2] += Fl
                 ftemp[3]+=Fl[1]*u[i,j]+Fl[2]*v[i,j]
             Fb[i, j, 2:4] .= ftemp
-            end
+            fill!(ftemp,0.0)
+        end
         end
     end
     return Fb
 end
 
 
-function _curve_force(xs, dthe, t, K=.1)
+function _curve_force(xs, dthe, t, K,tempf)
     k = size(xs)[1]
-    tempf = Array{Float32}(undef,k, 2)
     @threads for i = 2:k - 1
         tempf[i, :] = ((xs[i + 1,:] - 2 * xs[i, :] + xs[i - 1,:])./ (dthe ^ 2)) *K
     end
@@ -129,7 +136,7 @@ function _curve_force(xs, dthe, t, K=.1)
     return tempf
 end
 
-function forcesBody(Qnew, X0,
+function forcesBody(vs,Qnew, X0,
                dx, dy,
                nx, ny)
     x = (1: nx) * dx
@@ -140,8 +147,7 @@ function forcesBody(Qnew, X0,
     points_n, _ = size(X0)
     ut=linear_interpolation((x,y), u)
     vt=linear_interpolation((x,y),v)
-    vs = Array{Float32}(undef,points_n, 2)
-    @inbounds for i = 1:points_n
+    @threads for i = 1:points_n
         temp_x = X0[i, :]
         xp = (floor(temp_x[1] / dx)% nx) * dx
         yp = (floor(temp_x[2] / dy)% ny) * dy

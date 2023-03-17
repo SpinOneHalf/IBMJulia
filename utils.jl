@@ -1,4 +1,4 @@
-# TODO Move delta functions to utils
+
 function beta(x)
     _beta = (9 / 4) - (3 / 2) * (x^ 2) + ((22 / 3)) * x - (7 / 3) * x^ 3
     return _beta
@@ -21,7 +21,6 @@ end
 
 function SixPointDelta(x)
     alpha = 28
-
     if x > -3  && x <= -2
         x = x + 3
         tempb = beta(x)
